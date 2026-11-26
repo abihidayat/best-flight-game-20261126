@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Island Run — Merpati Squadron</title>
+    <link rel="icon" href="data:,">
+    <style>
+        :root { --amber: #ffb000; --glass: rgba(0, 0, 0, 0.7); }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Segoe UI', system-ui, sans-serif; color: #fff; }
+        #game { display: block; width: 100vw; height: 100vh; }
+
+        .hud-panel { position: absolute; padding: 12px; background: var(--glass); border: 1px solid rgba(255,255,255,0.1); font-family: monospace; pointer-events: none; }
+        #hud-left { top: 20px; left: 20px; min-width: 140px; }
+        #hud-right { top: 20px; right: 20px; text-align: right; min-width: 140px; }
+        .hud-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 14px; }
+        .hud-val { color: var(--amber); font-weight: bold; margin-left: 10px; }
+
+        #hud-horizon-container { position: absolute; bottom: 20px; left: 20px; text-align: center; background: var(--glass); padding: 5px; border: 1px solid rgba(255,255,255,0.1); }
+        #hud-horizon { display: block; width: 160px; height: 120px; }
+        .label-small { font-size: 10px; opacity: 0.7; margin-top: 4px; text-transform: uppercase; }
+
+        #hud-msg { position: absolute; top: 25%; left: 50%; transform: translate(-50%, -50%); text-align: center; width: 100%; font-weight: bold; font-size: 24px; color: var(--amber); text-shadow: 0 2px 4px rgba(0,0,0,0.5); pointer-events: none; }
+
+        #hud-panel { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); width: 400px; height: 80px; background: #111; border: 4px solid #333; border-bottom: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center; text-align: center; box-shadow: 0 -10px 30px rgba(0,0,0,0.8); }
+        .cp-unit { font-size: 28px; color: var(--amber); font-family: monospace; }
+        .cp-label { font-size: 10px; opacity: 0.6; }
+
+        .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; text-align: center; }
+        /* Title + complete screens are translucent gradients, content up top,
+           so the runway / plane / sunset scene stays visible behind them. */
+        #hud-title, #hud-complete { background: linear-gradient(rgba(0,0,0,0.55), rgba(0,0,0,0.08) 45%, rgba(0,0,0,0.4)); justify-content: flex-start; padding-top: 7vh; }
+        .overlay h1 { font-size: 64px; margin: 0; letter-spacing: 4px; color: var(--amber); }
+        .overlay h2 { font-size: 24px; margin: 0 0 30px 0; opacity: 0.8; font-weight: 300; }
+        .controls { background: rgba(255,255,255,0.05); padding: 20px; border-radius: 8px; margin-bottom: 30px; line-height: 1.6; font-family: monospace; }
+        .btn-prompt { font-size: 20px; animation: blink 1s infinite alternate; }
+        @keyframes blink { from { opacity: 0.3; } to { opacity: 1; } }
+
+        #status { position: absolute; width: 1px; height: 1px; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+
+    <div id="hud-left" class="hud-panel">
+        <div class="hud-row">ALT <span id="hud-alt" class="hud-val">0</span></div>
+        <div class="hud-row">SPD <span id="hud-spd" class="hud-val">0</span></div>
+        <div class="hud-row">HDG <span id="hud-hdg" class="hud-val">000</span></div>
+        <div class="hud-row">THR <span id="hud-thr" class="hud-val">0%</span></div>
+    </div>
+
+    <div id="hud-right" class="hud-panel">
+        <div class="hud-row">SCORE <span id="hud-score" class="hud-val">0</span></div>
+        <div class="hud-row">RINGS <span id="hud-rings" class="hud-val">0/10</span></div>
+        <div class="hud-row">TIME <span id="hud-time" class="hud-val">3:00</span></div>
+        <div class="hud-row">LIVES <span id="hud-lives" class="hud-val">LIVES 3</span></div>
+    </div>
+
+    <div id="hud-horizon-container">
+        <canvas id="hud-horizon" width="160" height="120"></canvas>
+        <div class="label-small">Attitude</div>
+    </div>
+
+    <div id="hud-msg"></div>
+
+    <div id="hud-panel" style="display:none">
+        <div><div class="cp-label">ALTITUDE</div><div id="cp-alt" class="cp-unit">0</div></div>
+        <div><div class="cp-label">AIRSPEED</div><div id="cp-spd" class="cp-unit">0</div></div>
+        <div><div class="cp-label">HEADING</div><div id="cp-hdg" class="cp-unit">000</div></div>
+        <div style="grid-column: 1 / span 3; font-size: 9px; opacity: 0.4; padding-bottom: 4px;">COCKPIT — C FOR CHASE VIEW</div>
+    </div>
+
+    <div id="hud-title" class="overlay">
+        <h1>ISLAND RUN</h1>
+        <h2>Merpati Squadron</h2>
+        <div class="controls">
+            ARROWS / WASD : STEER<br>
+            SHIFT / CTRL : THROTTLE<br>
+            C : CAMERA VIEW<br>
+            P : PAUSE | R : RESTART<br>
+            SPACE : START GAME
+        </div>
+        <div style="margin-bottom:20px">BEST SCORE: <span id="hud-best">0</span></div>
+        <div class="btn-prompt">PRESS SPACE TO FLY</div>
+    </div>
+
+    <div id="hud-paused" class="overlay" style="display:none">
+        <h1>PAUSED</h1>
+        <div class="btn-prompt" style="margin-top:20px">PRESS P OR SPACE TO RESUME</div>
+    </div>
+
+    <div id="hud-over" class="overlay" style="display:none">
+        <h1>GAME OVER</h1>
+        <div style="font-size:24px; margin: 20px 0;">SCORE: <span id="hud-over-score">0</span></div>
+        <div style="margin-bottom:40px">BEST: <span id="hud-over-best">0</span></div>
+        <div class="btn-prompt">PRESS SPACE TO FLY AGAIN</div>
+    </div>
+
+    <div id="hud-complete" class="overlay" style="display:none">
+        <h1 style="color: #44ff44;">COURSE COMPLETE!</h1>
+        <div style="font-size:24px; margin: 20px 0;">SCORE: <span id="hud-complete-score">0</span></div>
+        <div style="margin-bottom:10px">TIME BONUS: <span id="hud-complete-time">0</span>s</div>
+        <div style="margin-bottom:40px">BEST: <span id="hud-complete-best">0</span></div>
+        <div class="btn-prompt">PRESS SPACE TO FLY AGAIN</div>
+    </div>
+
+    <p id="status" role="status" aria-live="polite"></p>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "./vendor/three.module.min.js"
+            }
+        }
+    </script>
+    <script type="module" src="./src/main.js"></script>
+</body>
+</html>
