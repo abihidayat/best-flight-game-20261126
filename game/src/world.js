@@ -1,268 +1,270 @@
+// game/src/world.js — the island, its airfield, town, forest and ring course.
+// All geometry is procedural and seeded: the same seed always builds the
+// same island. Units are metres, Y-up, sea level y = 0.
 import * as THREE from 'three';
-import { mulberry32, fbm2, valueNoise2 } from './random.js';
-import { WORLD, COLORS, RINGS, clamp } from './config.js';
+import { mulberry32, fbm2 } from './random.js';
+import { WORLD, COLORS, clamp } from './config.js';
+
+// The ten gates of the course, flown in order. Heights are metres above sea
+// level; the builder lifts any gate that would sit too close to the ground.
+const COURSE = [
+    [250, 45, 0], [420, 60, 180], [380, 75, 420], [120, 85, 520],
+    [-180, 90, 430], [-380, 70, 180], [-420, 55, -120],
+    [-260, 60, -380], [0, 50, -480], [220, 45, -260],
+];
+
+const RUNWAY = { x0: -350, x1: 150, y: 2.15, width: 14 };
 
 export function createWorld(seed) {
-    const rng = mulberry32(seed);
-    const worldGroup = new THREE.Group();
+    const rand = mulberry32(seed);
+    const root = new THREE.Group();
 
-    // --- Height Function ---
-    function heightAt(x, z) {
-        const d = Math.sqrt(x * x + z * z);
-        const islandMask = Math.max(0, Math.min(1, (600 - d) / 200));
-        if (islandMask <= 0) return -2;
+    // Ground height at (x, z). A smooth island rises out of the sea; two
+    // hills dominate it; the airfield strip is graded flat at y = 2.
+    function groundHeight(x, z) {
+        const dist = Math.sqrt(x * x + z * z);
+        const island = clamp((600 - dist) / 200, 0, 1);
+        if (island <= 0) return -2;
 
-        // Base terrain with FBM
         let h = fbm2(x * 0.004, z * 0.004) * 45;
+        h += 85 * Math.exp(-((x - 250) ** 2 + (z - 200) ** 2) / 12000);
+        h += 105 * Math.exp(-((x + 300) ** 2 + (z + 250) ** 2) / 18000);
 
-        // Two specific peaks
-        const p1 = Math.exp(-(Math.pow(x - 250, 2) + Math.pow(z - 200, 2)) / 12000) * 85;
-        const p2 = Math.exp(-(Math.pow(x + 300, 2) + Math.pow(z + 250, 2)) / 18000) * 105;
-        h += p1 + p2;
-
-        // Airfield flattening: the runway strip (x -350..150, |z| <= 12) is
-        // flat at y = 2, fading out over 60 m in x and 30 m in z so the pad
-        // meets the hills instead of the runway being buried under terrain.
-        const ax = 1 - clamp((Math.abs(x + 100) - 250) / 60, 0, 1);
-        const az = 1 - clamp((Math.abs(z) - 12) / 30, 0, 1);
-        const airfieldMask = ax * az;
-        h = THREE.MathUtils.lerp(h * islandMask, 2.0, airfieldMask);
-
-        return h;
+        // Flat pad under the runway: full strength over the strip, fading
+        // out 60 m along x and 30 m along z so the pad meets the hills.
+        const along = 1 - clamp((Math.abs(x + 100) - 250) / 60, 0, 1);
+        const across = 1 - clamp((Math.abs(z) - 12) / 30, 0, 1);
+        return THREE.MathUtils.lerp(h * island, 2.0, along * across);
     }
 
-    // --- Terrain ---
-    const terrainSize = 1400;
-    const terrainSegments = 140;
-    const terrainGeo = new THREE.PlaneGeometry(terrainSize, terrainSize, terrainSegments, terrainSegments);
-    terrainGeo.rotateX(-Math.PI / 2);
-
-    const vertices = terrainGeo.attributes.position.array;
-    const colors = new Float32Array(vertices.length);
-    const colorA = new THREE.Color();
-
-    for (let i = 0; i < vertices.length; i += 3) {
-        const x = vertices[i];
-        const z = vertices[i + 2];
-        const h = heightAt(x, z);
-        vertices[i + 1] = h;
-
-        // Calculate slope roughly for coloring
-        const hR = heightAt(x + 5, z);
-        const hF = heightAt(x, z + 5);
-        const slope = Math.abs(h - hR) + Math.abs(h - hF);
-
-        if (h < 1.2) {
-            colorA.set(COLORS.SAND);
-        } else if (h > 98 && slope < 2) {
-            colorA.set(0xffffff); // Snow
-        } else if (slope > 3.5 || h > 70) {
-            colorA.set(COLORS.ROCK);
-        } else {
-            colorA.set(COLORS.GRASS);
-        }
-        colorA.toArray(colors, i);
+    // --- Ground ------------------------------------------------------------
+    const groundGeo = new THREE.PlaneGeometry(1400, 1400, 140, 140);
+    groundGeo.rotateX(-Math.PI / 2);
+    const verts = groundGeo.attributes.position.array;
+    const tint = new Float32Array(verts.length);
+    const c = new THREE.Color();
+    for (let i = 0; i < verts.length; i += 3) {
+        const x = verts[i];
+        const z = verts[i + 2];
+        const h = groundHeight(x, z);
+        verts[i + 1] = h;
+        const slope = Math.abs(h - groundHeight(x + 5, z))
+                    + Math.abs(h - groundHeight(x, z + 5));
+        if (h < 1.2) c.set(COLORS.SAND);
+        else if (h > 98 && slope < 2) c.set(0xffffff);
+        else if (slope > 3.5 || h > 70) c.set(COLORS.ROCK);
+        else c.set(COLORS.GRASS);
+        c.toArray(tint, i);
     }
-    terrainGeo.computeVertexNormals();
-    terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    groundGeo.computeVertexNormals();
+    groundGeo.setAttribute('color', new THREE.BufferAttribute(tint, 3));
+    root.add(new THREE.Mesh(
+        groundGeo,
+        new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }),
+    ));
 
-    const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 });
-    const terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
-    worldGroup.add(terrainMesh);
-
-    // --- Sea ---
+    // --- Sea ---------------------------------------------------------------
+    const seaMat = new THREE.MeshStandardMaterial({
+        color: COLORS.SEA, transparent: true, opacity: 0.7, roughness: 0.1,
+    });
     const seaGeo = new THREE.PlaneGeometry(3000, 3000);
     seaGeo.rotateX(-Math.PI / 2);
-    const seaMat = new THREE.MeshStandardMaterial({
-        color: COLORS.SEA,
-        transparent: true,
-        opacity: 0.7,
-        roughness: 0.1
-    });
-    const seaMesh = new THREE.Mesh(seaGeo, seaMat);
-    seaMesh.position.y = 0;
-    worldGroup.add(seaMesh);
+    const sea = new THREE.Mesh(seaGeo, seaMat);
+    root.add(sea);
 
-    // --- Runway ---
-    const rwWidth = 14;
-    const rwStart = -350;
-    const rwEnd = 150;
-    const rwLen = rwEnd - rwStart;
-    const rwGeo = new THREE.PlaneGeometry(rwLen, rwWidth);
-    rwGeo.rotateX(-Math.PI / 2);
+    // --- Runway ------------------------------------------------------------
+    const stripCanvas = document.createElement('canvas');
+    stripCanvas.width = 512;
+    stripCanvas.height = 64;
+    const g2 = stripCanvas.getContext('2d');
+    g2.fillStyle = '#222';
+    g2.fillRect(0, 0, 512, 64);
+    g2.strokeStyle = '#fff';
+    g2.setLineDash([20, 20]);
+    g2.lineWidth = 2;
+    g2.beginPath();
+    g2.moveTo(0, 32);
+    g2.lineTo(512, 32);
+    g2.stroke();
+    g2.setLineDash([]);
+    g2.fillRect(10, 10, 5, 44);
+    g2.fillRect(20, 10, 5, 44);
+    g2.fillRect(487, 10, 5, 44);
+    g2.fillRect(497, 10, 5, 44);
+    const stripTex = new THREE.CanvasTexture(stripCanvas);
+    stripTex.wrapS = THREE.RepeatWrapping;
+    const stripGeo = new THREE.PlaneGeometry(RUNWAY.x1 - RUNWAY.x0, RUNWAY.width);
+    stripGeo.rotateX(-Math.PI / 2);
+    const strip = new THREE.Mesh(
+        stripGeo, new THREE.MeshBasicMaterial({ map: stripTex }),
+    );
+    strip.position.set((RUNWAY.x0 + RUNWAY.x1) / 2, RUNWAY.y, 0);
+    root.add(strip);
 
-    const rwCanvas = document.createElement('canvas');
-    rwCanvas.width = 512; rwCanvas.height = 64;
-    const ctx = rwCanvas.getContext('2d');
-    ctx.fillStyle = '#222';
-    ctx.fillRect(0, 0, 512, 64);
-    ctx.strokeStyle = '#fff';
-    ctx.setLineDash([20, 20]);
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(0, 32); ctx.lineTo(512, 32);
-    ctx.stroke();
-    // Thresholds
-    ctx.setLineDash([]);
-    ctx.fillRect(10, 10, 5, 44); ctx.fillRect(20, 10, 5, 44);
-    ctx.fillRect(497, 10, 5, 44); ctx.fillRect(487, 10, 5, 44);
-
-    const rwTex = new THREE.CanvasTexture(rwCanvas);
-    rwTex.wrapS = THREE.RepeatWrapping;
-    const rwMat = new THREE.MeshBasicMaterial({ map: rwTex });
-    const rwMesh = new THREE.Mesh(rwGeo, rwMat);
-    rwMesh.position.set((rwStart + rwEnd) / 2, 2.15, 0);
-    worldGroup.add(rwMesh);
-
-    // Hangars
-    const hangarGeo = new THREE.BoxGeometry(20, 10, 30);
-    const hangarMat = new THREE.MeshStandardMaterial({ color: 0x888888 });
+    // --- Airfield buildings -------------------------------------------------
+    const shedMat = new THREE.MeshStandardMaterial({ color: 0x888888 });
+    const shedGeo = new THREE.BoxGeometry(20, 10, 30);
     for (let i = 0; i < 2; i++) {
-        const hng = new THREE.Mesh(hangarGeo, hangarMat);
-        hng.position.set(-280 + i * 40, 7, -25);
-        worldGroup.add(hng);
+        const shed = new THREE.Mesh(shedGeo, shedMat);
+        shed.position.set(-280 + i * 40, 7, -25);
+        root.add(shed);
     }
-
-    // Windsock
-    const poleGeo = new THREE.CylinderGeometry(0.2, 0.2, 8);
-    const pole = new THREE.Mesh(poleGeo, hangarMat);
-    pole.position.set(-320, 6, 15);
+    // Windsock: pole + orange cone pointing downwind.
+    const mast = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.2, 0.2, 8), shedMat,
+    );
+    mast.position.set(-320, 6, 15);
     const sockGeo = new THREE.ConeGeometry(1, 4, 8);
     sockGeo.rotateZ(Math.PI / 2);
-    const sockMat = new THREE.MeshBasicMaterial({ color: 0xff3300 });
-    const sock = new THREE.Mesh(sockGeo, sockMat);
+    const sock = new THREE.Mesh(
+        sockGeo, new THREE.MeshBasicMaterial({ color: 0xff3300 }),
+    );
     sock.position.set(2, 4, 0);
-    pole.add(sock);
-    worldGroup.add(pole);
+    mast.add(sock);
+    root.add(mast);
 
-    // --- Town ---
+    // --- Town: a dozen blocks south of the strip, windows lit -------------
     const winCanvas = document.createElement('canvas');
-    winCanvas.width = 64; winCanvas.height = 64;
-    const wctx = winCanvas.getContext('2d');
-    wctx.fillStyle = '#333'; wctx.fillRect(0,0,64,64);
-    wctx.fillStyle = '#ffcc00';
-    for(let i=0; i<4; i++) for(let j=0; j<6; j++) if(rng() > 0.3) wctx.fillRect(i*16+4, j*10+4, 8, 5);
-    const winTex = new THREE.CanvasTexture(winCanvas);
-    const townMat = new THREE.MeshStandardMaterial({ color: 0x555555, emissiveMap: winTex, emissive: new THREE.Color(0xffffff), emissiveIntensity: 0.5 });
-
-    for (let i = 0; i < 12; i++) {
-        const twH = 5 + rng() * 15;
-        const twBox = new THREE.Mesh(new THREE.BoxGeometry(8, twH, 8), townMat);
-        const tx = -250 + rng() * 200;
-        const tz = 40 + rng() * 100;
-        twBox.position.set(tx, heightAt(tx, tz) + twH / 2, tz);
-        worldGroup.add(twBox);
-    }
-
-    // --- Trees ---
-    const treeTrunkGeo = new THREE.CylinderGeometry(0.35, 0.45, 3, 6);
-    const treeTopGeo = new THREE.ConeGeometry(2.5, 7, 8);
-    treeTopGeo.translate(0, 5, 0);
-    const trunkMesh = new THREE.InstancedMesh(treeTrunkGeo, new THREE.MeshStandardMaterial({ color: 0x5a3a22 }), 120);
-    const treeMesh = new THREE.InstancedMesh(treeTopGeo, new THREE.MeshStandardMaterial({ color: 0x2f7a1e }), 120);
-    let treeCount = 0;
-    for (let i = 0; i < 1000 && treeCount < 120; i++) {
-        const rx = (rng() - 0.5) * 1100;
-        const rz = (rng() - 0.5) * 1100;
-        const rh = heightAt(rx, rz);
-        if (rh > 4 && rh < 45 && Math.abs(rz) > 25) {
-            const m = new THREE.Matrix4().makeTranslation(rx, rh, rz);
-            trunkMesh.setMatrixAt(treeCount, m);
-            treeMesh.setMatrixAt(treeCount, m);
-            treeCount++;
+    winCanvas.width = 64;
+    winCanvas.height = 64;
+    const w2 = winCanvas.getContext('2d');
+    w2.fillStyle = '#333';
+    w2.fillRect(0, 0, 64, 64);
+    w2.fillStyle = '#ffcc00';
+    for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 6; j++) {
+            if (rand() > 0.3) w2.fillRect(i * 16 + 4, j * 10 + 4, 8, 5);
         }
     }
-    trunkMesh.count = treeCount;
-    treeMesh.count = treeCount;
-    worldGroup.add(trunkMesh);
-    worldGroup.add(treeMesh);
+    const winTex = new THREE.CanvasTexture(winCanvas);
+    const townMat = new THREE.MeshStandardMaterial({
+        color: 0x555555,
+        emissiveMap: winTex,
+        emissive: new THREE.Color(0xffffff),
+        emissiveIntensity: 0.5,
+    });
+    for (let i = 0; i < 12; i++) {
+        const hgt = 5 + rand() * 15;
+        const block = new THREE.Mesh(new THREE.BoxGeometry(8, hgt, 8), townMat);
+        const bx = -250 + rand() * 200;
+        const bz = 40 + rand() * 100;
+        block.position.set(bx, groundHeight(bx, bz) + hgt / 2, bz);
+        root.add(block);
+    }
 
-    // --- Clouds ---
+    // --- Forest: instanced trunks + cones, kept off the strip --------------
+    const trunkGeo = new THREE.CylinderGeometry(0.35, 0.45, 3, 6);
+    const crownGeo = new THREE.ConeGeometry(2.5, 7, 8);
+    crownGeo.translate(0, 5, 0);
+    const trunks = new THREE.InstancedMesh(
+        trunkGeo, new THREE.MeshStandardMaterial({ color: 0x5a3a22 }), 120,
+    );
+    const crowns = new THREE.InstancedMesh(
+        crownGeo, new THREE.MeshStandardMaterial({ color: 0x2f7a1e }), 120,
+    );
+    let planted = 0;
+    for (let i = 0; i < 1000 && planted < 120; i++) {
+        const tx = (rand() - 0.5) * 1100;
+        const tz = (rand() - 0.5) * 1100;
+        const th = groundHeight(tx, tz);
+        if (th > 4 && th < 45 && Math.abs(tz) > 25) {
+            const m = new THREE.Matrix4().makeTranslation(tx, th, tz);
+            trunks.setMatrixAt(planted, m);
+            crowns.setMatrixAt(planted, m);
+            planted++;
+        }
+    }
+    trunks.count = planted;
+    crowns.count = planted;
+    root.add(trunks);
+    root.add(crowns);
+
+    // --- Clouds: drifting puffs of white spheres ----------------------------
     const clouds = [];
     for (let i = 0; i < 10; i++) {
-        const cloudGroup = new THREE.Group();
-        const numSpheres = 3 + Math.floor(rng() * 3);
-        const cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
-        for (let j = 0; j < numSpheres; j++) {
-            const s = new THREE.Mesh(new THREE.SphereGeometry(10 + rng() * 10, 8, 8), cloudMat);
-            s.scale.y = 0.5;
-            s.position.set(rng() * 20 - 10, rng() * 5, rng() * 20 - 10);
-            cloudGroup.add(s);
+        const puff = new THREE.Group();
+        const puffs = 3 + Math.floor(rand() * 3);
+        const puffMat = new THREE.MeshBasicMaterial({
+            color: 0xffffff, transparent: true, opacity: 0.8,
+        });
+        for (let j = 0; j < puffs; j++) {
+            const ball = new THREE.Mesh(
+                new THREE.SphereGeometry(10 + rand() * 10, 8, 8), puffMat,
+            );
+            ball.scale.y = 0.5;
+            ball.position.set(rand() * 20 - 10, rand() * 5, rand() * 20 - 10);
+            puff.add(ball);
         }
-        cloudGroup.position.set((rng() - 0.5) * 1200, 150 + rng() * 70, (rng() - 0.5) * 1200);
-        worldGroup.add(cloudGroup);
-        clouds.push({ mesh: cloudGroup, speed: 2 + rng() * 3 });
+        puff.position.set(
+            (rand() - 0.5) * 1200, 150 + rand() * 70, (rand() - 0.5) * 1200,
+        );
+        root.add(puff);
+        clouds.push({ mesh: puff, speed: 2 + rand() * 3 });
     }
 
-    // --- Rings ---
-    const ringCoords = [
-        [250, 45, 0], [420, 60, 180], [380, 75, 420], [120, 85, 520], [-180, 90, 430],
-        [-380, 70, 180], [-420, 55, -120], [-260, 60, -380], [0, 50, -480], [220, 45, -260]
-    ];
+    // --- The course: ten golden toruses, each facing the next --------------
     const rings = [];
-    const ringGeo = new THREE.TorusGeometry(13, 1.2, 12, 24);
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+    const torusGeo = new THREE.TorusGeometry(13, 1.2, 12, 24);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+    COURSE.forEach((spot, i) => {
+        const pos = new THREE.Vector3(spot[0], spot[1], spot[2]);
+        const floor = groundHeight(pos.x, pos.z);
+        pos.y = Math.max(pos.y, floor + 25);
 
-    ringCoords.forEach((coord, i) => {
-        const pos = new THREE.Vector3(coord[0], coord[1], coord[2]);
-        const terrainH = heightAt(pos.x, pos.z);
-        pos.y = Math.max(pos.y, terrainH + 25);
+        const mat = new THREE.MeshStandardMaterial({
+            color: 0xffaa00, emissive: 0xffaa00, emissiveIntensity: 2,
+        });
+        const hoop = new THREE.Mesh(torusGeo, mat);
+        hoop.position.copy(pos);
+        const nxt = COURSE[(i + 1) % COURSE.length];
+        hoop.lookAt(new THREE.Vector3(nxt[0], nxt[1], nxt[2]));
 
-        const rMat = new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0xffaa00, emissiveIntensity: 2 });
-        const rMesh = new THREE.Mesh(ringGeo, rMat);
-        rMesh.position.copy(pos);
-
-        // Orient ring: hole faces the next ring on the course
-        const nextIdx = (i + 1) % ringCoords.length;
-        const target = new THREE.Vector3(ringCoords[nextIdx][0], ringCoords[nextIdx][1], ringCoords[nextIdx][2]);
-        rMesh.lookAt(target);
-
-        // Pole down to the terrain (only when the ring is close to the ground)
-        const pLen = pos.y - terrainH;
-        if (pLen < 45) {
-            const pGeo = new THREE.CylinderGeometry(0.5, 0.5, pLen);
-            const pMesh = new THREE.Mesh(pGeo, poleMat);
-            pMesh.position.set(pos.x, terrainH + pLen / 2, pos.z);
-            worldGroup.add(pMesh);
+        // A post down to the ground, but only when the gate is low enough
+        // for one to look right.
+        const drop = pos.y - floor;
+        if (drop < 45) {
+            const post = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.5, 0.5, drop), postMat,
+            );
+            post.position.set(pos.x, floor + drop / 2, pos.z);
+            root.add(post);
         }
-
-        worldGroup.add(rMesh);
-        rings.push({ pos, radius: 13, passed: false, mesh: rMesh, material: rMat });
+        root.add(hoop);
+        rings.push({ pos, radius: 13, passed: false, mesh: hoop, material: mat });
     });
 
-    return {
-        group: worldGroup,
-        heightAt,
+    const api = {
+        group: root,
+        heightAt: groundHeight,
         rings,
-        runway: { start: new THREE.Vector3(rwStart, 2, 0), end: new THREE.Vector3(rwEnd, 2, 0), mesh: rwMesh },
+        runway: {
+            start: new THREE.Vector3(RUNWAY.x0, RUNWAY.y, 0),
+            end: new THREE.Vector3(RUNWAY.x1, RUNWAY.y, 0),
+            mesh: strip,
+        },
         reset() {
-            rings.forEach(r => {
+            for (const r of rings) {
                 r.passed = false;
                 r.material.color.set(0xffaa00);
                 r.material.emissive.set(0xffaa00);
                 r.mesh.scale.setScalar(1);
-            });
+            }
         },
         update(dt, t) {
-            // Animate Sea
             seaMat.opacity = 0.6 + Math.sin(t * 0.5) * 0.1;
-
-            // Drift Clouds
-            clouds.forEach(c => {
-                c.mesh.position.x += c.speed * dt;
-                if (c.mesh.position.x > 800) c.mesh.position.x = -800;
-            });
-
-            // Pulse next ring
-            const next = this.nextRing();
+            for (const cl of clouds) {
+                cl.mesh.position.x += cl.speed * dt;
+                if (cl.mesh.position.x > 800) cl.mesh.position.x = -800;
+            }
+            const next = api.nextRing();
             if (next) {
-                const s = 1 + Math.sin(t * 6) * 0.15;
-                next.mesh.scale.set(s, s, s);
+                const pulse = 1 + Math.sin(t * 6) * 0.15;
+                next.mesh.scale.set(pulse, pulse, pulse);
                 next.material.emissiveIntensity = 2 + Math.sin(t * 6) * 1;
             }
         },
         nextRing() {
-            return rings.find(r => !r.passed) || null;
+            return rings.find((r) => !r.passed) || null;
         },
         markPassed(ring) {
             ring.passed = true;
@@ -271,7 +273,9 @@ export function createWorld(seed) {
             ring.mesh.scale.setScalar(1);
         },
         isSea(x, z) {
-            return heightAt(x, z) <= 0.3 && Math.sqrt(x * x + z * z) > 450;
-        }
+            return groundHeight(x, z) <= 0.3
+                && Math.sqrt(x * x + z * z) > 450;
+        },
     };
+    return api;
 }

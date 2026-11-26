@@ -1,137 +1,130 @@
-// game/src/audio.js
-
+// game/src/audio.js — all sound is synthesized with WebAudio: engine drone,
+// wind rush, a chime for each gate, a thud for a crash, a tick for menus.
+// Nothing is fetched; the graph is built lazily on the first user gesture.
 export function createAudio() {
     let ctx = null;
-    let masterGain = null;
-    let engineOsc1 = null;
-    let engineOsc2 = null;
-    let engineGain = null;
-    let windNoise = null;
-    let windGain = null;
-    let isInitialized = false;
+    let master = null;
+    let oscA = null;
+    let oscB = null;
+    let engineBus = null;
+    let windSrc = null;
+    let windBus = null;
+    let ready = false;
+
+    // One short pitched blip: an oscillator with a frequency ramp and a
+    // gain envelope, connected straight to the master bus.
+    function blip(type, from, to, seconds, vol) {
+        if (!ready) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(from, now);
+        osc.frequency.exponentialRampToValueAtTime(Math.max(to, 1), now + seconds);
+        gain.gain.setValueAtTime(vol, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + seconds);
+        osc.connect(gain);
+        gain.connect(master);
+        osc.start(now);
+        osc.stop(now + seconds);
+    }
+
+    // A looped white-noise buffer shared by the wind bed and the crash burst.
+    function noiseBuffer() {
+        const len = 2 * ctx.sampleRate;
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+        return buf;
+    }
 
     const api = {
         muted: false,
+
         resume: async () => {
-            if (isInitialized) {
+            if (ready) {
                 if (ctx.state === 'suspended') await ctx.resume();
                 return;
             }
             try {
                 ctx = new (window.AudioContext || window.webkitAudioContext)();
-                masterGain = ctx.createGain();
-                masterGain.connect(ctx.destination);
+                master = ctx.createGain();
+                master.connect(ctx.destination);
 
-                // Engine
-                engineGain = ctx.createGain();
-                engineGain.gain.value = 0;
-                engineOsc1 = ctx.createOscillator();
-                engineOsc1.type = 'sawtooth';
-                engineOsc1.frequency.value = 55;
-                engineOsc2 = ctx.createOscillator();
-                engineOsc2.type = 'square';
-                engineOsc2.frequency.value = 27.5;
+                // Engine: a sawtooth plus a sub-octave square, both fed
+                // through one gain so the throttle can swell them together.
+                engineBus = ctx.createGain();
+                engineBus.gain.value = 0;
+                oscA = ctx.createOscillator();
+                oscA.type = 'sawtooth';
+                oscA.frequency.value = 55;
+                oscB = ctx.createOscillator();
+                oscB.type = 'square';
+                oscB.frequency.value = 27.5;
+                oscA.connect(engineBus);
+                oscB.connect(engineBus);
+                engineBus.connect(master);
+                oscA.start();
+                oscB.start();
 
-                engineOsc1.connect(engineGain);
-                engineOsc2.connect(engineGain);
-                engineGain.connect(masterGain);
-                engineOsc1.start();
-                engineOsc2.start();
+                // Wind: looped noise through a lowpass, gain tied to speed.
+                const filter = ctx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.value = 1000;
+                windBus = ctx.createGain();
+                windBus.gain.value = 0;
+                windSrc = ctx.createBufferSource();
+                windSrc.buffer = noiseBuffer();
+                windSrc.loop = true;
+                windSrc.connect(filter);
+                filter.connect(windBus);
+                windBus.connect(master);
+                windSrc.start();
 
-                // Wind
-                const bufferSize = 2 * ctx.sampleRate;
-                const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-                const output = noiseBuffer.getChannelData(0);
-                for (let i = 0; i < bufferSize; i++) {
-                    output[i] = Math.random() * 2 - 1;
-                }
-                windNoise = ctx.createBufferSource();
-                windNoise.buffer = noiseBuffer;
-                windNoise.loop = true;
-
-                const windFilter = ctx.createBiquadFilter();
-                windFilter.type = 'lowpass';
-                windFilter.frequency.value = 1000;
-
-                windGain = ctx.createGain();
-                windGain.gain.value = 0;
-
-                windNoise.connect(windFilter);
-                windFilter.connect(windGain);
-                windGain.connect(masterGain);
-                windNoise.start();
-
-                isInitialized = true;
+                ready = true;
             } catch (e) {
-                console.warn("Audio init failed", e);
+                console.warn('Audio init failed', e);
             }
         },
-        setEngine: (throttle, speedNorm) => {
-            if (!isInitialized) return;
-            const now = ctx.currentTime;
-            const freqBase = 50 + throttle * 60 + speedNorm * 40;
-            engineOsc1.frequency.setTargetAtTime(freqBase, now, 0.1);
-            engineOsc2.frequency.setTargetAtTime(freqBase * 0.505, now, 0.1);
-            engineGain.gain.setTargetAtTime(0.1 + throttle * 0.2, now, 0.1);
-            windGain.gain.setTargetAtTime(speedNorm * 0.15, now, 0.2);
-        },
-        ring: () => {
-            if (!isInitialized) return;
-            const now = ctx.currentTime;
-            const osc = ctx.createOscillator();
-            const g = ctx.createGain();
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(880, now);
-            osc.frequency.exponentialRampToValueAtTime(1320, now + 0.1);
-            g.gain.setValueAtTime(0.2, now);
-            g.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
-            osc.connect(g);
-            g.connect(masterGain);
-            osc.start();
-            osc.stop(now + 0.4);
-        },
-        crash: () => {
-            if (!isInitialized) return;
-            const now = ctx.currentTime;
-            const osc = ctx.createOscillator();
-            const g = ctx.createGain();
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(100, now);
-            osc.frequency.exponentialRampToValueAtTime(40, now + 0.5);
-            g.gain.setValueAtTime(0.5, now);
-            g.gain.linearRampToValueAtTime(0, now + 0.5);
-            osc.connect(g);
-            g.connect(masterGain);
-            osc.start();
-            osc.stop(now + 0.5);
 
-            const n = ctx.createBufferSource();
-            const ng = ctx.createGain();
-            n.buffer = windNoise.buffer;
-            ng.gain.setValueAtTime(0.5, now);
-            ng.gain.linearRampToValueAtTime(0, now + 0.6);
-            n.connect(ng);
-            ng.connect(masterGain);
-            n.start();
-        },
-        click: () => {
-            if (!isInitialized) return;
+        setEngine: (throttle, speed01) => {
+            if (!ready) return;
             const now = ctx.currentTime;
-            const osc = ctx.createOscillator();
-            const g = ctx.createGain();
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(1200, now);
-            g.gain.setValueAtTime(0.1, now);
-            g.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
-            osc.connect(g);
-            g.connect(masterGain);
-            osc.start();
-            osc.stop(now + 0.05);
+            const base = 50 + throttle * 60 + speed01 * 40;
+            oscA.frequency.setTargetAtTime(base, now, 0.1);
+            oscB.frequency.setTargetAtTime(base * 0.505, now, 0.1);
+            engineBus.gain.setTargetAtTime(0.1 + throttle * 0.2, now, 0.1);
+            windBus.gain.setTargetAtTime(speed01 * 0.15, now, 0.2);
         },
+
+        ring: () => {
+            blip('sine', 880, 1320, 0.4, 0.2);
+        },
+
+        crash: () => {
+            if (!ready) return;
+            blip('sine', 100, 40, 0.5, 0.5);
+            const now = ctx.currentTime;
+            const burst = ctx.createBufferSource();
+            burst.buffer = windSrc.buffer;
+            const gain = ctx.createGain();
+            gain.gain.setValueAtTime(0.5, now);
+            gain.gain.linearRampToValueAtTime(0, now + 0.6);
+            burst.connect(gain);
+            gain.connect(master);
+            burst.start(now);
+        },
+
+        click: () => {
+            blip('sine', 1200, 1200, 0.05, 0.1);
+        },
+
         setMuted: (m) => {
             api.muted = m;
-            if (masterGain) masterGain.gain.setTargetAtTime(m ? 0 : 1, ctx.currentTime, 0.05);
-        }
+            if (master) {
+                master.gain.setTargetAtTime(m ? 0 : 1, ctx.currentTime, 0.05);
+            }
+        },
     };
 
     return api;
